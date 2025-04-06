@@ -7,13 +7,15 @@
 
 #include "OutputManager.h"
 using namespace DirectX;
+using namespace winrt;
+
+// How early do we request wake up prior to VBlank. This must be sufficient to run our copy shader.
+static constexpr uint64_t OffsetFromVBlank = 5'000'000;
 
 //
 // Constructor NULLs out all pointers & sets appropriate var vals
 //
-OUTPUTMANAGER::OUTPUTMANAGER() : m_SwapChain(nullptr),
-                                 m_Device(nullptr),
-                                 m_Factory(nullptr),
+OUTPUTMANAGER::OUTPUTMANAGER() : m_Device(nullptr),
                                  m_DeviceContext(nullptr),
                                  m_RTV(nullptr),
                                  m_SamplerLinear(nullptr),
@@ -22,10 +24,7 @@ OUTPUTMANAGER::OUTPUTMANAGER() : m_SwapChain(nullptr),
                                  m_PixelShader(nullptr),
                                  m_InputLayout(nullptr),
                                  m_SharedSurf(nullptr),
-                                 m_KeyMutex(nullptr),
-                                 m_WindowHandle(nullptr),
-                                 m_NeedsResize(false),
-                                 m_OcclusionCookie(0)
+                                 m_KeyMutex(nullptr)
 {
 }
 
@@ -34,125 +33,19 @@ OUTPUTMANAGER::OUTPUTMANAGER() : m_SwapChain(nullptr),
 //
 OUTPUTMANAGER::~OUTPUTMANAGER()
 {
+    WaitNextVBlank();
     CleanRefs();
-}
-
-//
-// Indicates that window has been resized.
-//
-void OUTPUTMANAGER::WindowResize()
-{
-    m_NeedsResize = true;
 }
 
 //
 // Initialize all state
 //
-DUPL_RETURN OUTPUTMANAGER::InitOutput(HWND Window, INT SingleOutput, _Out_ UINT* OutCount, _Out_ RECT* DeskBounds)
+DUPL_RETURN OUTPUTMANAGER::InitOutput(INT SingleOutput, _Out_ UINT* OutCount, _Out_ RECT* DeskBounds)
 {
     HRESULT hr;
 
-    // Store window handle
-    m_WindowHandle = Window;
-
-    // Driver types supported
-    D3D_DRIVER_TYPE DriverTypes[] =
-    {
-        D3D_DRIVER_TYPE_HARDWARE,
-        D3D_DRIVER_TYPE_WARP,
-        D3D_DRIVER_TYPE_REFERENCE,
-    };
-    UINT NumDriverTypes = ARRAYSIZE(DriverTypes);
-
-    // Feature levels supported
-    D3D_FEATURE_LEVEL FeatureLevels[] =
-    {
-        D3D_FEATURE_LEVEL_11_0,
-        D3D_FEATURE_LEVEL_10_1,
-        D3D_FEATURE_LEVEL_10_0,
-        D3D_FEATURE_LEVEL_9_1
-    };
-    UINT NumFeatureLevels = ARRAYSIZE(FeatureLevels);
-    D3D_FEATURE_LEVEL FeatureLevel;
-
-    // Create device
-    for (UINT DriverTypeIndex = 0; DriverTypeIndex < NumDriverTypes; ++DriverTypeIndex)
-    {
-        hr = D3D11CreateDevice(nullptr, DriverTypes[DriverTypeIndex], nullptr, 0, FeatureLevels, NumFeatureLevels,
-        D3D11_SDK_VERSION, &m_Device, &FeatureLevel, &m_DeviceContext);
-        if (SUCCEEDED(hr))
-        {
-            // Device creation succeeded, no need to loop anymore
-            break;
-        }
-    }
-    if (FAILED(hr))
-    {
-        return ProcessFailure(m_Device, L"Device creation in OUTPUTMANAGER failed", L"Error", hr, SystemTransitionsExpectedErrors);
-    }
-
-    // Get DXGI factory
-    IDXGIDevice* DxgiDevice = nullptr;
-    hr = m_Device->QueryInterface(__uuidof(IDXGIDevice), reinterpret_cast<void**>(&DxgiDevice));
-    if (FAILED(hr))
-    {
-        return ProcessFailure(nullptr, L"Failed to QI for DXGI Device", L"Error", hr, nullptr);
-    }
-
-    IDXGIAdapter* DxgiAdapter = nullptr;
-    hr = DxgiDevice->GetParent(__uuidof(IDXGIAdapter), reinterpret_cast<void**>(&DxgiAdapter));
-    DxgiDevice->Release();
-    DxgiDevice = nullptr;
-    if (FAILED(hr))
-    {
-        return ProcessFailure(m_Device, L"Failed to get parent DXGI Adapter", L"Error", hr, SystemTransitionsExpectedErrors);
-    }
-
-    hr = DxgiAdapter->GetParent(__uuidof(IDXGIFactory2), reinterpret_cast<void**>(&m_Factory));
-    DxgiAdapter->Release();
-    DxgiAdapter = nullptr;
-    if (FAILED(hr))
-    {
-        return ProcessFailure(m_Device, L"Failed to get parent DXGI Factory", L"Error", hr, SystemTransitionsExpectedErrors);
-    }
-
-    // Register for occlusion status windows message
-    hr = m_Factory->RegisterOcclusionStatusWindow(Window, OCCLUSION_STATUS_MSG, &m_OcclusionCookie);
-    if (FAILED(hr))
-    {
-        return ProcessFailure(m_Device, L"Failed to register for occlusion message", L"Error", hr, SystemTransitionsExpectedErrors);
-    }
-
-    // Get window size
-    RECT WindowRect;
-    GetClientRect(m_WindowHandle, &WindowRect);
-    UINT Width = WindowRect.right - WindowRect.left;
-    UINT Height = WindowRect.bottom - WindowRect.top;
-
-    // Create swapchain for window
-    DXGI_SWAP_CHAIN_DESC1 SwapChainDesc;
-    RtlZeroMemory(&SwapChainDesc, sizeof(SwapChainDesc));
-
-    SwapChainDesc.SwapEffect = DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL;
-    SwapChainDesc.BufferCount = 2;
-    SwapChainDesc.Width = Width;
-    SwapChainDesc.Height = Height;
-    SwapChainDesc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
-    SwapChainDesc.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
-    SwapChainDesc.SampleDesc.Count = 1;
-    SwapChainDesc.SampleDesc.Quality = 0;
-    hr = m_Factory->CreateSwapChainForHwnd(m_Device, Window, &SwapChainDesc, nullptr, nullptr, &m_SwapChain);
-    if (FAILED(hr))
-    {
-        return ProcessFailure(m_Device, L"Failed to create window swapchain", L"Error", hr, SystemTransitionsExpectedErrors);
-    }
-
-    // Disable the ALT-ENTER shortcut for entering full-screen mode
-    hr = m_Factory->MakeWindowAssociation(Window, DXGI_MWA_NO_ALT_ENTER);
-    if (FAILED(hr))
-    {
-        return ProcessFailure(m_Device, L"Failed to make window association", L"Error", hr, SystemTransitionsExpectedErrors);
-    }
+    // Open the output device and create the backbuffers;
+    OpenOutput(0xd94d, 0xc207, 90.f);
 
     // Create shared texture
     DUPL_RETURN Return = CreateSharedSurf(SingleOutput, OutCount, DeskBounds);
@@ -169,7 +62,7 @@ DUPL_RETURN OUTPUTMANAGER::InitOutput(HWND Window, INT SingleOutput, _Out_ UINT*
     }
 
     // Set view port
-    SetViewPort(Width, Height);
+    SetViewPort(m_DisplayWidth, m_DisplayHeight);
 
     // Create the sample state
     D3D11_SAMPLER_DESC SampDesc;
@@ -212,10 +105,291 @@ DUPL_RETURN OUTPUTMANAGER::InitOutput(HWND Window, INT SingleOutput, _Out_ UINT*
         return Return;
     }
 
-    GetWindowRect(m_WindowHandle, &WindowRect);
-    MoveWindow(m_WindowHandle, WindowRect.left, WindowRect.top, (DeskBounds->right - DeskBounds->left) / 2, (DeskBounds->bottom - DeskBounds->top) / 2, TRUE);
-
     return Return;
+}
+
+//
+// Open Direct Display Output.
+//
+DUPL_RETURN OUTPUTMANAGER::OpenOutput(uint16_t vendorId, uint16_t productId, float refreshRate) {
+    // First, we disable Nvidia's protection of direct display mode devices. This is an undocumented API,
+    // but the function ID is available online.
+    {
+        typedef PVOID(*pfnQueryInterface)(DWORD);
+        typedef DWORD(*pfnNvAPI_Initialize)();
+        typedef DWORD(*pfnNvAPI_DISP_DisableDirectMode)(DWORD, DWORD);
+        HMODULE nvapi;
+        nvapi = LoadLibraryA("nvapi64.dll");
+        if (nvapi)
+        {
+            pfnQueryInterface QueryInterface = (pfnQueryInterface)GetProcAddress(nvapi, "nvapi_QueryInterface");
+            if (QueryInterface)
+            {
+                pfnNvAPI_Initialize NvAPI_Initialize = (pfnNvAPI_Initialize)QueryInterface(0x150E828UL);
+                // https://www.cnblogs.com/zzz3265/p/16517057.html
+                pfnNvAPI_DISP_DisableDirectMode NvAPI_DISP_DisableDirectMode = (pfnNvAPI_DISP_DisableDirectMode)QueryInterface(0x7951E57CUL);
+                if (NvAPI_Initialize && NvAPI_DISP_DisableDirectMode)
+                {
+                    DWORD retInitialize = NvAPI_Initialize();
+                    DWORD retDisableDirectMode = NvAPI_DISP_DisableDirectMode(vendorId, 0);
+                }
+            }
+            FreeLibrary(nvapi);
+        }
+    }
+
+    // Find the output.
+    m_DisplayManager = DisplayManager::Create(winrt::DisplayManagerOptions::None);
+    IVectorView<winrt::DisplayTarget> targets = m_DisplayManager.GetCurrentTargets();
+    auto myTargets = winrt::single_threaded_vector<winrt::DisplayTarget>();
+    for (auto&& target : targets)
+    {
+        winrt::DisplayMonitor monitor = target.TryGetMonitor();
+        if (!monitor)
+        {
+            continue;
+        }
+        winrt::com_array<uint8_t> edidBuffer = monitor.GetDescriptor(winrt::DisplayMonitorDescriptorKind::Edid);
+        const uint16_t deviceVendorId = *(uint16_t*)(edidBuffer.data() + 8);
+        const uint16_t deviceProductId = *(uint16_t*)(edidBuffer.data() + 10);
+
+        if (deviceVendorId == vendorId && deviceProductId == productId)
+        {
+            myTargets.Append(target);
+            break;
+        }
+    }
+
+    if (myTargets.Size() == 0)
+    {
+        return ProcessFailure(m_Device, L"No device found in OUTPUTMANAGER", L"Error", E_UNEXPECTED);
+    }
+
+    HRESULT hr;
+
+    auto stateResult = m_DisplayManager.TryAcquireTargetsAndCreateEmptyState(myTargets);
+    hr = stateResult.ExtendedErrorCode();
+    if (FAILED(hr))
+    {
+        return ProcessFailure(m_Device, L"Failed to acquire target in OUTPUTMANAGER", L"Error", hr, SystemTransitionsExpectedErrors);
+    }
+    auto state = stateResult.State();
+
+    auto target = *myTargets.First();
+    winrt::DisplayPath path = state.ConnectTarget(target);
+
+    // Configure the device.
+    path.IsInterlaced(false);
+    path.Scaling(winrt::DisplayPathScaling::Identity);
+    // Output format cannot be sRGB, but our RTVs will be.
+    path.SourcePixelFormat(winrt::DirectXPixelFormat::B8G8R8A8UIntNormalized);
+
+    // Pick the desired refresh rate.
+    winrt::IVectorView<winrt::DisplayModeInfo> modes = path.FindModes(winrt::DisplayModeQueryOptions::OnlyPreferredResolution);
+    winrt::DisplayModeInfo bestMode{ nullptr };
+    double bestModeDiff = INFINITY;
+    for (auto&& mode : modes)
+    {
+        auto vSync = mode.PresentationRate().VerticalSyncRate;
+        double vSyncDouble = (double)vSync.Numerator / vSync.Denominator;
+
+        double modeDiff = abs(vSyncDouble - refreshRate);
+        if (modeDiff < bestModeDiff)
+        {
+            bestMode = mode;
+            bestModeDiff = modeDiff;
+        }
+    }
+
+    if (bestMode)
+    {
+        path.ApplyPropertiesFromMode(bestMode);
+    }
+    else
+    {
+        return ProcessFailure(m_Device, L"Failed to set refresh rate in OUTPUTMANAGER", L"Error", E_UNEXPECTED);
+    }
+
+    auto applyResult = state.TryApply(winrt::DisplayStateApplyOptions::None);
+    hr = applyResult.ExtendedErrorCode();
+    if (FAILED(hr))
+    {
+        return ProcessFailure(m_Device, L"Failed to apply mode in OUTPUTMANAGER", L"Error", hr, SystemTransitionsExpectedErrors);
+    }
+
+    // Re-read the current state to see the final state that was applied (with all properties).
+    stateResult = m_DisplayManager.TryAcquireTargetsAndReadCurrentState(myTargets);
+    hr = stateResult.ExtendedErrorCode();
+    if (FAILED(hr))
+    {
+        return ProcessFailure(m_Device, L"Failed to acquire target in OUTPUTMANAGER", L"Error", hr, SystemTransitionsExpectedErrors);
+    }
+    state = stateResult.State();
+
+    m_DisplayTarget = std::move(target);
+    m_DisplayDevice = std::move(m_DisplayManager.CreateDisplayDevice(m_DisplayTarget.Adapter()));
+    m_DisplayTaskPool = m_DisplayDevice.CreateTaskPool();
+
+    // Create the D3D device we will use for this output.
+    auto adapterLuid = m_DisplayTarget.Adapter().Id();
+
+    {
+        com_ptr<IDXGIFactory6> dxgiFactory;
+        hr = CreateDXGIFactory2(0, __uuidof(IDXGIFactory6), (void**)dxgiFactory.put());
+        if (FAILED(hr))
+        {
+            return ProcessFailure(m_Device, L"Failed to create DXGI Factory in OUTPUTMANAGER", L"Error", hr, SystemTransitionsExpectedErrors);
+        }
+        com_ptr<IDXGIAdapter> dxgiAdapter;
+        hr = dxgiFactory->EnumAdapterByLuid({ adapterLuid.LowPart, adapterLuid.HighPart }, __uuidof(IDXGIAdapter), (void**)dxgiAdapter.put());
+        if (FAILED(hr))
+        {
+            return ProcessFailure(m_Device, L"Failed to find adapter in OUTPUTMANAGER", L"Error", hr, SystemTransitionsExpectedErrors);
+        }
+        com_ptr<ID3D11Device> device;
+        com_ptr<ID3D11DeviceContext> deviceContext;
+        D3D_FEATURE_LEVEL featureLevel = D3D_FEATURE_LEVEL_11_0;
+        UINT creationFlags = D3D11_CREATE_DEVICE_BGRA_SUPPORT;
+#ifdef _DEBUG
+        creationFlags |= D3D11_CREATE_DEVICE_DEBUG;
+#endif
+        hr = D3D11CreateDevice(dxgiAdapter.get(),
+            D3D_DRIVER_TYPE_UNKNOWN,
+            nullptr,
+            creationFlags,
+            &featureLevel,
+            1,
+            D3D11_SDK_VERSION,
+            device.put(),
+            nullptr,
+            deviceContext.put());
+        if (FAILED(hr))
+        {
+            return ProcessFailure(m_Device, L"Failed to create D3D Device in OUTPUTMANAGER", L"Error", hr, SystemTransitionsExpectedErrors);
+        }
+
+        // Boost the device's priority.
+        auto dxgiDevice = device.as<IDXGIDevice>();
+        {
+            dxgiDevice->SetGPUThreadPriority(7);
+        }
+
+        device->QueryInterface(__uuidof(ID3D11Device5), (void**)&m_Device);
+        deviceContext->QueryInterface(__uuidof(ID3D11DeviceContext4), (void**)&m_DeviceContext);
+    }
+
+    auto deviceInterop = m_DisplayDevice.as<IDisplayDeviceInterop>();
+
+    // Create the output surfaces.
+    {
+        auto path = state.GetPathForTarget(m_DisplayTarget);
+        m_DisplaySource = m_DisplayDevice.CreateScanoutSource(m_DisplayTarget);
+
+        const winrt::SizeInt32 sourceResolution = path.SourceResolution().Value();
+        m_DisplayWidth = sourceResolution.Width;
+        m_DisplayHeight = sourceResolution.Height;
+        winrt::Direct3D11::Direct3DMultisampleDescription multisampleDesc = {};
+        multisampleDesc.Count = 1;
+
+        winrt::DisplayPrimaryDescription primaryDesc{
+            static_cast<uint32_t>(sourceResolution.Width),
+            static_cast<uint32_t>(sourceResolution.Height),
+            winrt::DirectXPixelFormat::B8G8R8A8UIntNormalizedSrgb,
+            winrt::DirectXColorSpace::RgbFullG22NoneP709,
+            false,
+            multisampleDesc
+        };
+
+        for (uint32_t i = 0; i < 2; i++)
+        {
+            OutputSurface surface{};
+
+            surface.primary = m_DisplayDevice.CreatePrimary(m_DisplayTarget, primaryDesc);
+
+            // Immediately after chaging the refresh rate, we must retry until success.
+            if (i == 0)
+            {
+                for (uint32_t retry = 0; retry < 2; retry++) {
+                    try
+                    {
+                        surface.scanout = m_DisplayDevice.CreateSimpleScanout(m_DisplaySource, surface.primary, 0, 1);
+                        break;
+                    }
+                    catch (winrt::hresult_error&)
+                    {
+                        Sleep(500);
+                    }
+                }
+            }
+            if (!surface.scanout)
+            {
+                surface.scanout = m_DisplayDevice.CreateSimpleScanout(m_DisplaySource, surface.primary, 0, 1);
+            }
+
+            // Open on the presentation device.
+            auto surfaceRaw = surface.primary.as<::IInspectable>();
+            winrt::handle handle;
+            hr = deviceInterop->CreateSharedHandle(surfaceRaw.get(), nullptr, GENERIC_ALL, nullptr, handle.put());
+            if (FAILED(hr))
+            {
+                return ProcessFailure(m_Device, L"Failed to create shared surface handle in OUTPUTMANAGER", L"Error", hr, SystemTransitionsExpectedErrors);
+            }
+            hr = m_Device->OpenSharedResource1(handle.get(), __uuidof(ID3D11Texture2D), (void**)surface.surface.put());
+            if (FAILED(hr))
+            {
+                return ProcessFailure(m_Device, L"Failed to open shared surface handle in OUTPUTMANAGER", L"Error", hr, SystemTransitionsExpectedErrors);
+            }
+
+            m_OutputSurfaces.push_back(std::move(surface));
+        }
+    }
+
+    // Create a fence to signal completion of LSR before we can trigger scanout.
+    {
+        hr = m_Device->CreateFence(0, D3D11_FENCE_FLAG_SHARED, __uuidof(ID3D11Fence), (void**)m_DisplayFenceOnPresentationDevice.put());
+        if (FAILED(hr))
+        {
+            return ProcessFailure(m_Device, L"Failed to create shared fence in OUTPUTMANAGER", L"Error", hr, SystemTransitionsExpectedErrors);
+        }
+
+        winrt::handle handle;
+        hr = m_DisplayFenceOnPresentationDevice->CreateSharedHandle(nullptr, GENERIC_ALL, nullptr, handle.put());
+        if (FAILED(hr))
+        {
+            return ProcessFailure(m_Device, L"Failed to create shared fence handle in OUTPUTMANAGER", L"Error", hr, SystemTransitionsExpectedErrors);
+        }
+
+        winrt::com_ptr<::IInspectable> displayFence;
+        hr = deviceInterop->OpenSharedHandle(handle.get(), __uuidof(::IInspectable), (void**)displayFence.put());
+        if (FAILED(hr))
+        {
+            return ProcessFailure(m_Device, L"Failed to open shared fence handle in OUTPUTMANAGER", L"Error", hr, SystemTransitionsExpectedErrors);
+        }
+
+        m_DisplayFenceOnDisplayDevice = displayFence.as<winrt::DisplayFence>();
+    }
+
+    // Create a fence to wake up the presentation thread to perform LSR just before scanout.
+    {
+        m_VBlankFenceOnDisplayDevice = m_DisplayDevice.CreatePeriodicFence(m_DisplayTarget, std::chrono::milliseconds(OffsetFromVBlank / 1'000'000));
+
+        winrt::handle handle;
+        hr = deviceInterop->CreateSharedHandle(m_VBlankFenceOnDisplayDevice.as<::IInspectable>().get(), nullptr, GENERIC_ALL,nullptr, handle.put());
+        if (FAILED(hr))
+        {
+            return ProcessFailure(m_Device, L"Failed to create shared fence handle in OUTPUTMANAGER", L"Error", hr, SystemTransitionsExpectedErrors);
+        }
+
+        hr = m_Device->OpenSharedFence(handle.get(), __uuidof(ID3D11Fence), (void**)m_VBlankFenceOnPresentationDevice.put());
+        if (FAILED(hr))
+        {
+            return ProcessFailure(m_Device, L"Failed to open shared fence handle in OUTPUTMANAGER", L"Error", hr, SystemTransitionsExpectedErrors);
+        }
+
+        m_VBlankEvent.attach(CreateEventEx(nullptr, L"VBlank Fence", 0, EVENT_ALL_ACCESS));
+    }
+
+    return DUPL_RETURN_SUCCESS;
 }
 
 //
@@ -355,7 +529,7 @@ DUPL_RETURN OUTPUTMANAGER::CreateSharedSurf(INT SingleOutput, _Out_ UINT* OutCou
 //
 // Present to the application window
 //
-DUPL_RETURN OUTPUTMANAGER::UpdateApplicationWindow(_In_ PTR_INFO* PointerInfo, _Inout_ bool* Occluded)
+DUPL_RETURN OUTPUTMANAGER::UpdateApplicationWindow(_In_ PTR_INFO* PointerInfo)
 {
     // In a typical desktop duplication application there would be an application running on one system collecting the desktop images
     // and another application running on a different system that receives the desktop images via a network and display the image. This
@@ -396,19 +570,58 @@ DUPL_RETURN OUTPUTMANAGER::UpdateApplicationWindow(_In_ PTR_INFO* PointerInfo, _
     // Present to window if all worked
     if (Ret == DUPL_RETURN_SUCCESS)
     {
-        // Present to window
-        hr = m_SwapChain->Present(1, 0);
-        if (FAILED(hr))
-        {
-            return ProcessFailure(m_Device, L"Failed to present", L"Error", hr, SystemTransitionsExpectedErrors);
-        }
-        else if (hr == DXGI_STATUS_OCCLUDED)
-        {
-            *Occluded = true;
-        }
+        Ret = Present();
     }
 
     return Ret;
+}
+
+//
+// Schedule scanout of the frame.
+//
+DUPL_RETURN OUTPUTMANAGER::Present() {
+    ++m_DisplayFenceValue;
+    HRESULT hr = m_DeviceContext->Signal(m_DisplayFenceOnPresentationDevice.get(), m_DisplayFenceValue);
+    if (FAILED(hr))
+    {
+        return ProcessFailure(m_Device, L"Failed to signal fence in OUTPUTMANAGER", L"Error", hr, SystemTransitionsExpectedErrors);
+    }
+
+    m_DeviceContext->Flush();
+
+    winrt::DisplayTask task = m_DisplayTaskPool.CreateTask();
+    task.SetScanout(m_OutputSurfaces[m_OutputSurfaceIndex].scanout);
+    task.SetWait(m_DisplayFenceOnDisplayDevice, m_DisplayFenceValue);
+
+    m_DisplayTaskPool.ExecuteTask(task);
+
+    // Switch backbuffer.
+    m_OutputSurfaceIndex ^= 1;
+
+    return DUPL_RETURN_SUCCESS;
+}
+
+//
+// Wait for the next v-blank event.
+//
+DUPL_RETURN OUTPUTMANAGER::WaitNextVBlank() {
+    HRESULT hr = m_VBlankFenceOnPresentationDevice->SetEventOnCompletion(m_VBlankFenceValue, m_VBlankEvent.get());
+    if (FAILED(hr))
+    {
+        return ProcessFailure(m_Device, L"Failed to set fence event in OUTPUTMANAGER", L"Error", hr, SystemTransitionsExpectedErrors);
+    }
+
+    DWORD waited = WaitForSingleObject(m_VBlankEvent.get(), 200);
+    if (waited != WAIT_OBJECT_0)
+    {
+        return ProcessFailure(m_Device, L"Failed to wait for fence in OUTPUTMANAGER", L"Error", E_UNEXPECTED);
+    }
+
+    // When using a real display output, assume the fence increases monotonically (per
+    // CreatePeriodicFence()).
+    m_VBlankFenceValue = m_VBlankFenceOnPresentationDevice->GetCompletedValue() + 1;
+
+    return DUPL_RETURN_SUCCESS;
 }
 
 //
@@ -438,17 +651,6 @@ HANDLE OUTPUTMANAGER::GetSharedHandle()
 DUPL_RETURN OUTPUTMANAGER::DrawFrame()
 {
     HRESULT hr;
-
-    // If window was resized, resize swapchain
-    if (m_NeedsResize)
-    {
-        DUPL_RETURN Ret = ResizeSwapChain();
-        if (Ret != DUPL_RETURN_SUCCESS)
-        {
-            return Ret;
-        }
-        m_NeedsResize = false;
-    }
 
     // Vertices for drawing whole texture
     VERTEX Vertices[NUMVERTICES] =
@@ -945,15 +1147,10 @@ DUPL_RETURN OUTPUTMANAGER::InitShaders()
 DUPL_RETURN OUTPUTMANAGER::MakeRTV()
 {
     // Get backbuffer
-    ID3D11Texture2D* BackBuffer = nullptr;
-    HRESULT hr = m_SwapChain->GetBuffer(0, __uuidof(ID3D11Texture2D), reinterpret_cast<void**>(&BackBuffer));
-    if (FAILED(hr))
-    {
-        return ProcessFailure(m_Device, L"Failed to get backbuffer for making render target view in OUTPUTMANAGER", L"Error", hr, SystemTransitionsExpectedErrors);
-    }
+    ID3D11Texture2D* BackBuffer = m_OutputSurfaces[m_OutputSurfaceIndex].surface.get();
 
     // Create a render target view
-    hr = m_Device->CreateRenderTargetView(BackBuffer, nullptr, &m_RTV);
+    HRESULT hr = m_Device->CreateRenderTargetView(BackBuffer, nullptr, &m_RTV);
     BackBuffer->Release();
     if (FAILED(hr))
     {
@@ -979,44 +1176,6 @@ void OUTPUTMANAGER::SetViewPort(UINT Width, UINT Height)
     VP.TopLeftX = 0;
     VP.TopLeftY = 0;
     m_DeviceContext->RSSetViewports(1, &VP);
-}
-
-//
-// Resize swapchain
-//
-DUPL_RETURN OUTPUTMANAGER::ResizeSwapChain()
-{
-    if (m_RTV)
-    {
-        m_RTV->Release();
-        m_RTV = nullptr;
-    }
-
-    RECT WindowRect;
-    GetClientRect(m_WindowHandle, &WindowRect);
-    UINT Width = WindowRect.right - WindowRect.left;
-    UINT Height = WindowRect.bottom - WindowRect.top;
-
-    // Resize swapchain
-    DXGI_SWAP_CHAIN_DESC SwapChainDesc;
-    m_SwapChain->GetDesc(&SwapChainDesc);
-    HRESULT hr = m_SwapChain->ResizeBuffers(SwapChainDesc.BufferCount, Width, Height, SwapChainDesc.BufferDesc.Format, SwapChainDesc.Flags);
-    if (FAILED(hr))
-    {
-        return ProcessFailure(m_Device, L"Failed to resize swapchain buffers in OUTPUTMANAGER", L"Error", hr, SystemTransitionsExpectedErrors);
-    }
-
-    // Make new render target view
-    DUPL_RETURN Ret = MakeRTV();
-    if (Ret != DUPL_RETURN_SUCCESS)
-    {
-        return Ret;
-    }
-
-    // Set new viewport
-    SetViewPort(Width, Height);
-
-    return Ret;
 }
 
 //
@@ -1072,12 +1231,6 @@ void OUTPUTMANAGER::CleanRefs()
         m_Device = nullptr;
     }
 
-    if (m_SwapChain)
-    {
-        m_SwapChain->Release();
-        m_SwapChain = nullptr;
-    }
-
     if (m_SharedSurf)
     {
         m_SharedSurf->Release();
@@ -1088,16 +1241,5 @@ void OUTPUTMANAGER::CleanRefs()
     {
         m_KeyMutex->Release();
         m_KeyMutex = nullptr;
-    }
-
-    if (m_Factory)
-    {
-        if (m_OcclusionCookie)
-        {
-            m_Factory->UnregisterOcclusionStatus(m_OcclusionCookie);
-            m_OcclusionCookie = 0;
-        }
-        m_Factory->Release();
-        m_Factory = nullptr;
     }
 }

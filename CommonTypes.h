@@ -9,12 +9,26 @@
 #define _COMMONTYPES_H_
 
 #include <windows.h>
-#include <d3d11.h>
-#include <dxgi1_2.h>
+#include <d3d11_4.h>
+#include <dxgi1_6.h>
 #include <sal.h>
 #include <new>
 #include <warning.h>
 #include <DirectXMath.h>
+
+#include <winrt/Windows.Foundation.Collections.h>
+#include <winrt/Windows.Devices.Display.Core.h>
+#include <winrt/Windows.Graphics.DirectX.h>
+#include <windows.devices.display.core.interop.h>
+
+namespace winrt {
+    using namespace winrt::Windows::Foundation;
+    using namespace winrt::Windows::Devices::Display;
+    using namespace winrt::Windows::Devices::Display::Core;
+    using namespace winrt::Windows::Graphics;
+    using namespace winrt::Windows::Graphics::DirectX;
+    using namespace winrt::Windows::Foundation::Collections;
+} // namespace winrt
 
 #include "PixelShader.h"
 #include "VertexShader.h"

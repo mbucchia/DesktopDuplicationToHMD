@@ -245,7 +245,6 @@ int WINAPI WinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance, _
     // Message loop (attempts to update screen when no other messages to process)
     MSG msg = {0};
     bool FirstTime = true;
-    bool Occluded = true;
     DYNAMIC_WAIT DynamicWait;
 
     while (WM_QUIT != msg.message)
@@ -253,17 +252,9 @@ int WINAPI WinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance, _
         DUPL_RETURN Ret = DUPL_RETURN_SUCCESS;
         if (PeekMessage(&msg, nullptr, 0, 0, PM_REMOVE))
         {
-            if (msg.message == OCCLUSION_STATUS_MSG)
-            {
-                // Present may not be occluded now so try again
-                Occluded = false;
-            }
-            else
-            {
-                // Process window messages
-                TranslateMessage(&msg);
-                DispatchMessage(&msg);
-            }
+            // Process window messages
+            TranslateMessage(&msg);
+            DispatchMessage(&msg);
         }
         else if (WaitForSingleObjectEx(UnexpectedErrorEvent, 0, FALSE) == WAIT_OBJECT_0)
         {
@@ -295,7 +286,7 @@ int WINAPI WinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance, _
             }
 
             // Re-initialize
-            Ret = OutMgr.InitOutput(WindowHandle, SingleOutput, &OutputCount, &DeskBounds);
+            Ret = OutMgr.InitOutput(SingleOutput, &OutputCount, &DeskBounds);
             if (Ret == DUPL_RETURN_SUCCESS)
             {
                 HANDLE SharedHandle = OutMgr.GetSharedHandle();
@@ -309,17 +300,12 @@ int WINAPI WinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance, _
                     Ret = DUPL_RETURN_ERROR_UNEXPECTED;
                 }
             }
-
-            // We start off in occluded state and we should immediate get a occlusion status window message
-            Occluded = true;
         }
         else
         {
             // Nothing else to do, so try to present to write out to window if not occluded
-            if (!Occluded)
-            {
-                Ret = OutMgr.UpdateApplicationWindow(ThreadMgr.GetPointerInfo(), &Occluded);
-            }
+            OutMgr.WaitNextVBlank();
+            Ret = OutMgr.UpdateApplicationWindow(ThreadMgr.GetPointerInfo());
         }
 
         // Check if for errors
@@ -372,7 +358,7 @@ void ShowHelp()
 //
 bool ProcessCmdline(_Out_ INT* Output)
 {
-    *Output = -1;
+    *Output = 0;
 
     // __argv and __argc are global vars set by system
     for (UINT i = 1; i < static_cast<UINT>(__argc); ++i)
@@ -413,12 +399,6 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
         case WM_DESTROY:
         {
             PostQuitMessage(0);
-            break;
-        }
-        case WM_SIZE:
-        {
-            // Tell output manager that window size has changed
-            OutMgr.WindowResize();
             break;
         }
         default:
